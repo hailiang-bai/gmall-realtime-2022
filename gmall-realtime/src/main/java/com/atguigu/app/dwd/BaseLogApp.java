@@ -1,0 +1,192 @@
+package com.atguigu.app.dwd;
+
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
+import com.atguigu.utils.DateFormatUtil;
+import com.atguigu.utils.MyKafkaUtil;
+import org.apache.flink.api.common.functions.RichMapFunction;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.datastream.KeyedStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.ProcessFunction;
+import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
+//数据流 web/app -> Nginx -> 日志服务器(.log) -> Flume -> kafka(ODS) -> FlinkApp -> kafka(DWD)
+//程 序 Mock(lg.sh) -> flume(f1) -> kafka(zK) ->BaseLogApp ->kafka(Zk)
+public class BaseLogApp {
+    public static void main(String[] args) throws Exception {
+        // TODO 1.获取执行环境
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);//生产环境中设置为kafka主题的分区数量
+
+        /*//1.1开启checkpoint
+        env.enableCheckpointing(5*60000L, CheckpointingMode.EXACTLY_ONCE);
+        env.getCheckpointConfig().setCheckpointTimeout(10*60000L);
+        env.getCheckpointConfig().setMaxConcurrentCheckpoints(2);
+        env.setRestartStrategy(RestartStrategies.fixedDelayRestart(3,5000L));
+
+        //1.2设置状态后端
+        env.setStateBackend(new HashMapStateBackend());
+        env.getCheckpointConfig().setCheckpointStorage("hdfs://hadoop102:8020//211126/ck"); //因为要上传到集群，所以需要hadoop用户名
+        System.setProperty("HADOOP_SUER_NAME","atguigu");*/
+        // TODO 2.消费kafka topic_log 主题中的数据创建流
+        String topic = "topic_log";
+        String groupId="base_log_app_211126";
+        DataStreamSource<String> kafkaDS = env.addSource(MyKafkaUtil.getFlinkKafkaConsumer(topic, groupId));
+        // TODO 3.过滤掉非JSON格式的数据&将每行数据转化为JSON对象
+        OutputTag<String> dirtyTag = new OutputTag<String>("Dirty"){
+
+        };
+        SingleOutputStreamOperator<JSONObject> jsonObjDS = kafkaDS.process(new ProcessFunction<String, JSONObject>() {
+            @Override
+            public void processElement(String value, ProcessFunction<String, JSONObject>.Context ctx, Collector<JSONObject> out) throws Exception {
+                try {
+                    JSONObject jsonObject = JSON.parseObject(value);
+                    out.collect(jsonObject);
+                } catch (Exception e) {
+                    ctx.output(dirtyTag, value);
+                }
+            }
+        });
+        //获取测输出流脏数据并打印
+        DataStream<String> dirtyDS = jsonObjDS.getSideOutput(dirtyTag);
+        dirtyDS.print("DirtyDS>>>>>>>>>>>>");
+
+        // TODO 4.按照Mid分组
+        KeyedStream<JSONObject, String> keyedStream = jsonObjDS.keyBy(json -> json.getJSONObject("common").getString("mid"));
+
+        // TODO 5.使用状态变化层做新老访客标记校验
+        SingleOutputStreamOperator<JSONObject> jsonObjWithNewFlagDS = keyedStream.map(new RichMapFunction<JSONObject, JSONObject>() {
+
+            private ValueState<String> lastVisitState;
+
+            @Override
+            public void open(Configuration parameters) throws Exception {
+                lastVisitState = getRuntimeContext().getState(new ValueStateDescriptor<String>("last-visit", String.class));
+            }
+
+            @Override
+            public JSONObject map(JSONObject value) throws Exception {
+
+                //获取is_new字段标记 & ts 并将时间戳转化为年月日
+                String isNew = value.getJSONObject("common").getString("is_new");
+                Long ts = value.getLong("ts");
+                String curDate = DateFormatUtil.toDate(ts);
+
+                //获取状态中的日期
+                String lastDate = lastVisitState.value();
+                //判断is_new标记是否为“1”
+                if ("1".equals(isNew)) {
+                    if (lastDate == null) {
+                        lastVisitState.update(curDate);
+                    } else if (!lastDate.equals(curDate)) {
+                        value.getJSONObject("common").put("is_new", "0");
+                    }
+                } else if (lastDate == null) {
+                    lastVisitState.update(DateFormatUtil.toDate(ts - 24 * 60 * 60 * 1000L));
+                }
+
+                return value;
+            }
+        });
+        // TODO 6.使用测输出流进行分流处理,页面日志放入主流，启动，曝光，动作，错误日志放入侧输出流
+        OutputTag<String> startTag = new OutputTag<String>("start") {
+        };
+        OutputTag<String> displayTag = new OutputTag<String>("display") {
+        };
+        OutputTag<String> actionTag = new OutputTag<String>("action") {
+        };
+        OutputTag<String> errorTag = new OutputTag<String>("error") {
+        };
+
+        SingleOutputStreamOperator<String> pageDS = jsonObjWithNewFlagDS.process(new ProcessFunction<JSONObject, String>() {
+            @Override
+            public void processElement(JSONObject value, ProcessFunction<JSONObject, String>.Context ctx, Collector<String> out) throws Exception {
+                //尝试获取错误信息 五种类型日志中都有可能有错误日志
+                String err = value.getString("err");
+                if (err != null) {
+                    //将数据写到error侧输出流
+                    ctx.output(errorTag, value.toJSONString());
+                }
+
+                //移除错误日志
+                value.remove("err");
+
+                //尝试获取启动日志,启动日志和页面日志是互斥条件
+                String start = value.getString("start");
+                if (start != null) {
+                    //将数据写入到start侧输出流
+                    ctx.output(startTag, value.toJSONString());
+                } else {
+
+                    //获取公共信息 & 页面id & 时间戳用于后续曝光数据分析
+                    String common = value.getString("common");
+                    String pageId = value.getJSONObject("page").getString("page_id");
+                    Long ts = value.getLong("ts");
+                    //尝试获取曝光数据
+                    JSONArray displays = value.getJSONArray("displays");
+                    if (displays != null && displays.size() > 0) {
+                        //遍历曝光数据&写到display侧输出流
+                        for (int i = 0; i < displays.size(); i++) {
+                            JSONObject display = displays.getJSONObject(i);
+                            display.put("common", common);
+                            display.put("page_id", pageId);
+                            display.put("ts", ts);
+                            ctx.output(displayTag, display.toJSONString());
+                        }
+                    }
+                    //尝试获取动作日志
+                    JSONArray actions = value.getJSONArray("actions");
+                    if (actions != null && actions.size() > 0) {
+                        //遍历动作数据&写到display侧输出流
+                        for (int i = 0; i < actions.size(); i++) {
+                            JSONObject action = actions.getJSONObject(i);
+                            action.put("common", common);
+                            action.put("page_id", pageId);
+                            ctx.output(actionTag, action.toJSONString());
+                        }
+                    }
+                    //移除曝光和动作日志
+                    value.remove("displays");
+                    value.remove("actions");
+                    out.collect(value.toJSONString());
+
+                }
+            }
+        });
+        // TODO 7.提取各个测输出流数据
+        DataStream<String> startDS = pageDS.getSideOutput(startTag);
+        DataStream<String> displayDS = pageDS.getSideOutput(displayTag);
+        DataStream<String> actionDS = pageDS.getSideOutput(actionTag);
+        DataStream<String> errorDS = pageDS.getSideOutput(errorTag);
+
+        // TODO 8.将数据打印并写入对应的主题
+        pageDS.print("Page>>>>>>>>>>>>");
+        startDS.print("start>>>>>>>>>>");
+        displayDS.print("Display>>>>>>");
+        actionDS.print("action>>>>>>>>");
+        errorDS.print("err>>>>>>>>>>>>");
+
+        //  定义不同日志输出到 Kafka 的主题名称
+        String page_topic = "dwd_traffic_page_log";
+        String start_topic = "dwd_traffic_start_log";
+        String display_topic = "dwd_traffic_display_log";
+        String action_topic = "dwd_traffic_action_log";
+        String error_topic = "dwd_traffic_error_log";
+
+
+        pageDS.addSink(MyKafkaUtil.getFlinkKafkaProducer(page_topic));
+        startDS.addSink(MyKafkaUtil.getFlinkKafkaProducer(start_topic));
+        displayDS.addSink(MyKafkaUtil.getFlinkKafkaProducer(display_topic));
+        actionDS.addSink(MyKafkaUtil.getFlinkKafkaProducer(action_topic));
+        errorDS.addSink(MyKafkaUtil.getFlinkKafkaProducer(error_topic));
+        // TODO 9.启动任务
+        env.execute("BaseLogApp");
+    }
+}
