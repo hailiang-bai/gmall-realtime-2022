@@ -6,8 +6,10 @@ import com.atguigu.utils.DateFormatUtil;
 import com.atguigu.utils.MyKafkaUtil;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.RichFilterFunction;
+import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
@@ -15,6 +17,12 @@ import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.util.Collector;
 
+//数据流 web/app -> Nginx -> 日志服务器(.log) -> Flume -> kafka(ODS) -> FlinkApp -> kafka(DWD) -> FlinkAPP -> kafka(DWD)
+//程 序 Mock(lg.sh) -> flume(f1) -> kafka(zK) ->BaseLogApp ->kafka(Zk) ->DwdTrafficUniqueVisitorDetail -> kafka(ZK)
+
+/**
+ * 过滤每天的单独用户，用于后续统计每天的用户数量--独立访客
+ */
 public class DwdTrafficUniqueVisitorDetail {
     public static void main(String[] args) throws Exception {
         //TODO 1.获取执行环境
@@ -63,6 +71,11 @@ public class DwdTrafficUniqueVisitorDetail {
             @Override
             public void open(Configuration parameters) throws Exception {
                 ValueStateDescriptor<String> stateDescriptor = new ValueStateDescriptor<>("last-visit", String.class);
+                //设置状态的过期时间TTL
+                StateTtlConfig ttlConfig = new StateTtlConfig.Builder(Time.days(1))
+                        .setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite)
+                        .build();
+                stateDescriptor.enableTimeToLive(ttlConfig);
                 lastVisitState = getRuntimeContext().getState(stateDescriptor);
             }
             @Override

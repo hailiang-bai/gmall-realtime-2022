@@ -3,16 +3,21 @@ package com.atguigu.bean;
 import java.util.ArrayList;
 import java.util.HashSet;
 
-public class test {
-    public static void main(String[] args) {
-        System.out.println(String.class);
+public class test<T> {
 
-        ArrayList<Integer> integers = new ArrayList<>();
-        integers.add(1);
-        integers.add(1);
-        integers.add(2);
-        HashSet<Integer> set = new HashSet<>();
-        set.addAll(integers);
-        System.out.println(set.size());
+    void func(){
+        System.out.println("hhhhh");
+    }
+    static void func2(){
+        System.out.println("Xxxxxx");
+    }
+    public static void main(String[] args) {
+
+        test<String> stringtest = new test<String>(){};
+        test<String> stringtest2 = new test<String>();
+        System.out.println(stringtest);
+        System.out.println(stringtest2);
+        stringtest.func();
+
     }
 }

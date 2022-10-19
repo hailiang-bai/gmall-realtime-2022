@@ -43,6 +43,7 @@ public class BaseLogApp {
         OutputTag<String> dirtyTag = new OutputTag<String>("Dirty"){
 
         };
+
         SingleOutputStreamOperator<JSONObject> jsonObjDS = kafkaDS.process(new ProcessFunction<String, JSONObject>() {
             @Override
             public void processElement(String value, ProcessFunction<String, JSONObject>.Context ctx, Collector<JSONObject> out) throws Exception {
