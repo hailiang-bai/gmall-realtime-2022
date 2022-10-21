@@ -70,4 +70,70 @@ public class MyKafkaUtil {
                     }
                 },properties, FlinkKafkaProducer.Semantic.EXACTLY_ONCE);
     }
+
+    /**
+     * Kafka-Source DDL(Data Definition Language) 语句
+     *
+     * @param topic   数据源主题
+     * @param groupId 消费者组
+     * @return 拼接好的 Kafka 数据源 DDL 语句
+     */
+    public static String getKafkaDDL(String topic, String groupId) {
+
+        return " with ('connector' = 'kafka', " +
+                " 'topic' = '" + topic + "'," +
+                " 'properties.bootstrap.servers' = '" + KAFKA_SERVER + "', " +
+                " 'properties.group.id' = '" + groupId + "', " +
+                " 'format' = 'json', " +
+                " 'scan.startup.mode' = 'group-offsets')";
+    }
+    /**
+     * Kafka-Sink DDL 语句
+     *
+     * @param topic 输出到 Kafka 的目标主题
+     * @return 拼接好的 Kafka-Sink DDL 语句
+     */
+    public static String getKafkaSinkDDL(String topic) {
+        return "WITH ( " +
+                "  'connector' = 'kafka', " +
+                "  'topic' = '" + topic + "', " +
+                "  'properties.bootstrap.servers' = '" + KAFKA_SERVER + "', " +
+                "  'format' = 'json' " +
+                ")";
+    }
+
+
+    /**
+     *  topic_db 主题的 kafka-Source DDL 语句
+     * @param groupId 消费者组
+     * @return        拼接好的 Kafka 数据源的DDL语句
+     */
+    public static String getTopicDb(String groupId){
+        return "CREATE TABLE topic_db (   " +
+                "  `database` STRING,   " +
+                "  `table` STRING,   " +
+                "  `type` STRING,   " +
+                "  `data` MAP<STRING,STRING>,   " +
+                "  `old` MAP<STRING,STRING>,   " +
+                "  `pt` AS PROCTIME()   " +
+                ")" + getKafkaDDL("topic_db",groupId);
+    }
+
+    /**
+     * UpsertKafka-Sink DDL 语句
+     *
+     * @param topic 输出到 Kafka 的目标主题
+     * @return 拼接好的 UpsertKafka-Sink DDL 语句
+     */
+    public static String getUpsertKafkaDDL(String topic) {
+
+        return "WITH ( " +
+                "  'connector' = 'upsert-kafka', " +
+                "  'topic' = '" + topic + "', " +
+                "  'properties.bootstrap.servers' = '" + KAFKA_SERVER + "', " +
+                "  'key.format' = 'json', " +
+                "  'value.format' = 'json' " +
+                ")";
+    }
+
 }

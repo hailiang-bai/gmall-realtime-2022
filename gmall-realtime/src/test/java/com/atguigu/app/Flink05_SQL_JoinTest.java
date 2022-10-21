@@ -51,6 +51,7 @@ public class Flink05_SQL_JoinTest {
                 });
 
         //将流转化为动态表
+        //只有创建了临时视图动态表，后续才能使用fLinkSQL 的SQLQuery等查询
         tableEnv.createTemporaryView("t1",waterSensorDS1);
         tableEnv.createTemporaryView("t2", waterSensorDS2);
 
