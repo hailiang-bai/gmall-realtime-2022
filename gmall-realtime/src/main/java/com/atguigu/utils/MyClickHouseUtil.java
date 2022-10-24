@@ -14,7 +14,7 @@ import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import java.lang.reflect.Field;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
-public class ClickHouseUtil {
+public class MyClickHouseUtil {
     public static <T> SinkFunction<T> getSinkFunction(String sql) {
         return JdbcSink.<T>sink(sql,
                 new JdbcStatementBuilder<T>() {
